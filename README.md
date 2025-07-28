@@ -83,11 +83,28 @@ This project addresses the challenge of collecting video data from specialized o
    ```
 
 2. **Run the Script**
+   
+   **Standard workflow (with metadata):**
    ```bash
    yt-download.sh links.txt
    ```
+   
+   **H.264 conversion workflow (recommended for analysis):**
+   ```bash
+   yt-download.sh --h264 links.txt
+   ```
+   
+   **Get help:**
+   ```bash
+   yt-download.sh --help
+   ```
 
 The script will prompt you for download directory preferences and handle file conflicts automatically.
+
+### Workflow Options
+
+- **Standard Mode**: Downloads with embedded metadata, subtitles, and chapters
+- **H.264 Mode** (`--h264`): Downloads best video quality, converts to H.264 MP4 with CRF 23, removes audio and metadata for clean analysis files
 
 ## Contributing
 
