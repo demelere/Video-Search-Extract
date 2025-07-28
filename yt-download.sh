@@ -11,8 +11,16 @@ VIDEO_FORMAT="bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
 H264_MODE=false
 CONVERT_ONLY=false
 
+# Rate limiting settings
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_DELAY_MIN=2
+RATE_LIMIT_DELAY_MAX=4
+BATCH_BREAK_INTERVAL=10
+BATCH_BREAK_DURATION=10
+
 # Track processed URLs to avoid duplicates (Zsh compatible)
 PROCESSED_URLS=""
+PROCESSED_COUNT=0
 
 # Function to validate YouTube URL
 is_valid_youtube_url() {
@@ -86,15 +94,84 @@ is_duplicate_url() {
     return 1
 }
 
-# Function to fix malformed URLs
-fix_malformed_url() {
+# Function to robustly reconstruct URLs from fragments
+clean_url() {
     local url="$1"
-    # Fix common malformed URLs
-    if [[ "$url" =~ ^ttps:// ]]; then
-        url="h${url}"
-        echo "Fixed malformed URL: $url"
+    
+    # Remove any leading/trailing whitespace and control characters
+    url=$(echo "$url" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -d '\r\n')
+    
+    # If it's already a valid YouTube URL, return it
+    if [[ "$url" =~ ^https?://(www\.)?(youtube\.com/watch\?v=|youtube\.com/shorts/|youtu\.be/|youtube\.com/playlist\?list=)[a-zA-Z0-9_-]+(&.*)?$ ]]; then
+        echo "$url"
+        return 0
     fi
-    echo "$url"
+    
+    # If it's just a video ID, convert to full URL
+    if [[ "$url" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        url="https://www.youtube.com/watch?v=${url}"
+        echo "Converted video ID to URL: $url" >&2
+        echo "$url"
+        return 0
+    fi
+    
+    # Robust URL reconstruction from fragments
+    local reconstructed_url=""
+    
+    # Extract video ID if present (look for 11-character alphanumeric strings)
+    local video_id=$(echo "$url" | grep -o '[a-zA-Z0-9_-]\{11,\}' | head -1)
+    
+    if [[ -n "$video_id" ]]; then
+        # Determine URL type based on context
+        if [[ "$url" =~ shorts ]]; then
+            reconstructed_url="https://www.youtube.com/shorts/${video_id}"
+        elif [[ "$url" =~ playlist ]]; then
+            reconstructed_url="https://www.youtube.com/playlist?list=${video_id}"
+        else
+            reconstructed_url="https://www.youtube.com/watch?v=${video_id}"
+        fi
+        
+        echo "Reconstructed URL from fragments: $reconstructed_url" >&2
+        echo "$reconstructed_url"
+        return 0
+    fi
+    
+    # If no video ID found, try to fix common patterns
+    if [[ "$url" =~ youtube\.com ]]; then
+        # Add missing protocol if needed
+        if [[ ! "$url" =~ ^https?:// ]]; then
+            url="https://${url}"
+        fi
+        
+        # Add missing www if needed
+        if [[ "$url" =~ ^https?://youtube\.com ]]; then
+            url=$(echo "$url" | sed 's|https://youtube\.com|https://www.youtube.com|g')
+        fi
+        
+        echo "Fixed URL pattern: $url" >&2
+        echo "$url"
+        return 0
+    fi
+    
+    # If we can't reconstruct it, return error
+    echo "Unable to reconstruct URL from fragments: $url" >&2
+    return 1
+}
+
+# Function to handle rate limiting
+rate_limit() {
+    if [[ "$RATE_LIMIT_ENABLED" == "true" ]]; then
+        # Random delay between downloads
+        local delay=$((RANDOM % (RATE_LIMIT_DELAY_MAX - RATE_LIMIT_DELAY_MIN + 1) + RATE_LIMIT_DELAY_MIN))
+        echo "Rate limiting: waiting ${delay} seconds..."
+        sleep "$delay"
+        
+        # Batch break every N videos
+        if ((PROCESSED_COUNT % BATCH_BREAK_INTERVAL == 0 && PROCESSED_COUNT > 0)); then
+            echo "Batch break: waiting ${BATCH_BREAK_DURATION} seconds after ${PROCESSED_COUNT} videos..."
+            sleep "$BATCH_BREAK_DURATION"
+        fi
+    fi
 }
 
 # Function to handle potentially invalid URLs
@@ -138,18 +215,24 @@ parse_arguments() {
                 CONVERT_ONLY=true
                 shift
                 ;;
+            --no-rate-limit)
+                RATE_LIMIT_ENABLED=false
+                shift
+                ;;
             --help)
                 echo "Usage: $0 [OPTIONS] <input_file_with_youtube_links>"
                 echo ""
                 echo "Options:"
                 echo "  --h264         Use H.264 conversion workflow (best for analysis)"
                 echo "  --convert-only Convert existing files only (skip download)"
+                echo "  --no-rate-limit Disable rate limiting (use with caution)"
                 echo "  --help         Show this help message"
                 echo ""
                 echo "Examples:"
                 echo "  $0 links.txt                    # Standard workflow"
                 echo "  $0 --h264 links.txt             # H.264 conversion workflow"
                 echo "  $0 --convert-only               # Convert existing files only"
+                echo "  $0 --h264 --no-rate-limit links.txt  # Fast processing (use with caution)"
                 exit 0
                 ;;
             *)
@@ -306,10 +389,60 @@ Enter your choice (S/R/O/C): " "SROC")
         "$url"
 }
 
+# Function to preprocess and clean URLs from input file
+preprocess_urls() {
+    local input_file="$1"
+    local temp_file=$(mktemp)
+    
+    if [[ $? -ne 0 ]]; then
+        echo "Error: Failed to create temporary file" >&2
+        return 1
+    fi
+    
+    local line_count=0
+    local cleaned_count=0
+    
+    echo "Preprocessing URLs from: $input_file" >&2
+    
+    if [[ ! -f "$input_file" ]]; then
+        echo "Error: Input file not found: $input_file" >&2
+        return 1
+    fi
+    
+    if [[ ! -r "$input_file" ]]; then
+        echo "Error: Input file not readable: $input_file" >&2
+        return 1
+    fi
+    
+    # Read file using cat and process line by line to avoid buffering issues
+    cat "$input_file" | while IFS= read -r line; do
+        line_count=$((line_count + 1))
+        
+        # Skip empty lines or comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        
+        # Clean the URL
+        local cleaned_url=$(clean_url "$line")
+        local clean_result=$?
+        
+        if [[ $clean_result -eq 0 ]]; then
+            echo "$cleaned_url" >> "$temp_file"
+            cleaned_count=$((cleaned_count + 1))
+        else
+            echo "Warning: Skipping invalid URL on line $line_count: $line" >&2
+        fi
+        
+    done
+    
+    echo "Preprocessing complete: $cleaned_count valid URLs found" >&2
+    echo "$temp_file"
+}
+
 # Main script
 main() {
     local input_file="$INPUT_FILE"
     local download_dir=""
+    local processed_file=""
 
     # Get validated choice for download directory
     local dir_choice=$(get_validated_choice "Choose download directory:
@@ -338,24 +471,38 @@ Enter your choice (D/C/E): " "DCE")
         exit 1
     fi
 
+    # Preprocess and clean URLs
+    processed_file=$(preprocess_urls "$input_file")
+    local preprocess_result=$?
+    
+    if [[ $preprocess_result -ne 0 ]]; then
+        echo "Error: Failed to preprocess URLs (exit code: $preprocess_result)"
+        exit 1
+    fi
+    
+    if [[ ! -f "$processed_file" ]]; then
+        echo "Error: Preprocessed file not found: $processed_file"
+        exit 1
+    fi
+
     echo "Downloading to: $download_dir"
     
-    # Read the file line by line
-    while IFS= read -r line; do
+    # Read the cleaned file using cat to avoid buffering issues
+    cat "$processed_file" | while IFS= read -r line; do
         # Skip empty lines or lines starting with # (comments)
         [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
         
-        # Trim whitespace and carriage returns
-        line=$(echo "$line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        
-        # Fix malformed lines (missing 'h' in https)
-        if [[ "$line" =~ ^ttps:// ]]; then
-            line="h${line}"
-            echo "Fixed malformed line: $line"
-        fi
-        
-        # Extract YouTube URL
+        # Extract YouTube URL and clean it
         url=$(extract_youtube_url "$line")
+        
+        # Clean the URL to fix any corruption
+        cleaned_url=$(clean_url "$url")
+        if [[ $? -eq 0 ]]; then
+            url="$cleaned_url"
+        else
+            echo "Warning: Failed to clean URL: $url, skipping..."
+            continue
+        fi
         
         # Check for duplicates
         if is_duplicate_url "$url"; then
@@ -372,9 +519,16 @@ Enter your choice (D/C/E): " "DCE")
             fi
             # Mark URL as processed (even if download failed)
             PROCESSED_URLS="$PROCESSED_URLS $url"
+            PROCESSED_COUNT=$((PROCESSED_COUNT + 1))
             echo "---"
+            
+            # Apply rate limiting
+            rate_limit
         fi
-    done < "$input_file"
+    done
+
+    # Clean up temporary file
+    rm -f "$processed_file"
 
     echo "Download process completed."
 }
