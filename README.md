@@ -51,7 +51,43 @@ This project addresses the challenge of collecting video data from specialized o
 
 ## Getting Started
 
-*[Development in progress - setup instructions coming soon]*
+### Installation
+
+1. **Make the script executable:**
+   ```bash
+   chmod +x yt-download.sh
+   ```
+
+2. **Add to PATH:**
+   
+   **For Bash:**
+   ```bash
+   echo 'export PATH="/Users/<username and path>/Video-Search-Extract:$PATH"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+   
+   **For Zsh:**
+   ```bash
+   echo 'export PATH="/Users/<username and path>/Video-Search-Extract:$PATH"' >> ~/.zshrc
+   source ~/.zshrc
+   ```
+
+### 📥 Usage
+
+1. **Prepare Links File**
+   
+   Create a text file (e.g., `links.txt`) with YouTube URLs:
+   ```
+   https://youtu.be/video1 [Optional Description]
+   https://youtube.com/watch?v=video2 [Another Description]
+   ```
+
+2. **Run the Script**
+   ```bash
+   yt-download.sh links.txt
+   ```
+
+The script will prompt you for download directory preferences and handle file conflicts automatically.
 
 ## Contributing
 
